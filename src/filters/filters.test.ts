@@ -1,4 +1,19 @@
-import filters from "./filters";
+import filters, { FilterInput } from "./filters";
+
+const RIGHT_1 = { integrate: { offset: "2d" } } satisfies FilterInput;
+const RIGHT_11 = { integrate: "d" } satisfies FilterInput;
+const RIGHT_2 = "integrate" satisfies FilterInput;
+const RIGHT_3 = "delta" satisfies FilterInput;
+const RIGHT_4 = "deduplicate_adjacent" satisfies FilterInput;
+const RIGHT_5 = "force_numeric" satisfies FilterInput;
+const RIGHT_6 = "resample" satisfies FilterInput;
+const RIGHT_7 = { resample: "5m" } satisfies FilterInput;
+
+//@ts-expect-error
+const WRONG_1 = "add" satisfies FilterInput;
+//@ts-expect-error
+const WRONG_2 = { integrate: 3 } satisfies FilterInput;
+
 const data = {
   states: [],
   statistics: [],
@@ -14,6 +29,8 @@ const data = {
   },
   history: [],
   vars: {},
+  meta: {} as any,
+  hass: {} as any,
 };
 
 describe("filters", () => {
@@ -109,7 +126,7 @@ describe("filters", () => {
   });
   it("fn", () => {
     expect(
-      filters.map(`({xs,ys,...rest}) => ({xs:ys, ys:xs,...rest})`)(data)
+      filters.fn(`({xs,ys,...rest}) => ({xs:ys, ys:xs,...rest})`)(data),
     ).toEqual({
       attributes: {
         unit_of_measurement: "w",
@@ -121,5 +138,37 @@ describe("filters", () => {
         new Date("2022-12-20T00:07:30.000Z"),
       ],
     });
+  });
+});
+
+describe("resample", () => {
+  const t0 = +new Date("2022-12-20T18:00:00.000Z");
+  const input = (ys: (number | null)[]) => ({
+    ...data,
+    xs: [0, 10, 20].map((s) => new Date(t0 + s * 1000)),
+    ys,
+  });
+  const at = (...s: number[]) => s.map((s) => new Date(t0 + s * 1000));
+  it("holds the last value by default", () => {
+    const result = filters.resample("5s")(input([0, 10, 40]));
+    expect(result.xs).toEqual(at(0, 5, 10, 15));
+    expect(result.ys).toEqual([0, 0, 10, 10]);
+  });
+  it("accepts an object without interpolate", () => {
+    const result = filters.resample({ interval: "5s" })(input([0, 10, 40]));
+    expect(result.ys).toEqual([0, 0, 10, 10]);
+  });
+  it("interpolates linearly between neighbours", () => {
+    const result = filters.resample({ interval: "5s", interpolate: true })(
+      input([0, 10, 40]),
+    );
+    expect(result.xs).toEqual(at(0, 5, 10, 15));
+    expect(result.ys).toEqual([0, 5, 10, 25]);
+  });
+  it("holds the last value next to non-numeric values", () => {
+    const result = filters.resample({ interval: "5s", interpolate: true })(
+      input([0, null, 40]),
+    );
+    expect(result.ys).toEqual([0, 0, null, null]);
   });
 });

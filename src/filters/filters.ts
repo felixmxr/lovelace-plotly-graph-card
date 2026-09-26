@@ -31,6 +31,22 @@ type FilterData = {
 };
 export type FilterFn = (p: FilterData) => Partial<FilterData>;
 
+type FilterParam<K extends keyof typeof filters> = Parameters<
+  (typeof filters)[K]
+>[0];
+
+type CheckType<T, IfUndef, IfNonUndef> =
+  | (T extends undefined ? IfUndef : never)
+  | (T extends unknown ? IfNonUndef : never);
+
+export type FilterInput = {
+  [K in keyof typeof filters]: CheckType<
+    FilterParam<K>,
+    K,
+    { [P in K]: Exclude<FilterParam<K>, undefined> }
+  >;
+}[keyof typeof filters];
+
 const mapNumbers = (ys: YValue[], fn: (y: number, i: number) => number) =>
   ys.map((y, i) => {
     const n = castFloat(y);
@@ -79,7 +95,7 @@ const filters = {
       const mapping = mappingStr.map((str) => str.split("->").map(parseFloat));
       const regression = new LinearRegression(
         mapping.map(([x, _y]) => x),
-        mapping.map(([_x, y]) => y)
+        mapping.map(([_x, y]) => y),
       );
       return {
         ys: regression.predict(ys.map(castFloat)),
@@ -150,7 +166,7 @@ const filters = {
           unit?: keyof typeof timeUnits;
           reset_every?: TimeDurationStr;
           offset?: TimeDurationStr;
-        } = "h"
+        } = "h",
   ) => {
     const param =
       typeof unitOrObject == "string" ? { unit: unitOrObject } : unitOrObject;
@@ -197,7 +213,11 @@ const filters = {
     };
   },
   sliding_window_moving_average:
-    ({ window_size = 10, extended = false, centered = true } = {}) =>
+    ({
+      window_size = 10,
+      extended = false,
+      centered = true,
+    }: { window_size?: number; extended?: boolean; centered?: boolean } = {}) =>
     (params) => {
       const { xs, ys, ...rest } = force_numeric(params);
       const ys2: number[] = [];
@@ -227,7 +247,11 @@ const filters = {
       return { xs: xs2, ys: ys2, ...rest };
     },
   median:
-    ({ window_size = 10, extended = false, centered = true } = {}) =>
+    ({
+      window_size = 10,
+      extended = false,
+      centered = true,
+    }: { window_size?: number; extended?: boolean; centered?: boolean } = {}) =>
     (params) => {
       const { xs, ys, ...rest } = force_numeric(params);
       const ys2: number[] = [];
@@ -257,7 +281,7 @@ const filters = {
       return { ys: ys2, xs: xs2, ...rest };
     },
   exponential_moving_average:
-    ({ alpha = 0.1 } = {}) =>
+    ({ alpha = 0.1 }: { alpha?: number } = {}) =>
     (params) => {
       const { ys, ...rest } = force_numeric(params);
       let last = ys[0];
@@ -268,64 +292,87 @@ const filters = {
     },
   map_y_numbers: (fnStr: string) => {
     const fn = myEval(
-      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`
+      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`,
     );
     return ({ xs, ys, states, statistics, meta, vars, hass }) => ({
       xs,
       ys: mapNumbers(ys, (_, i) =>
         // prettier-ignore
-        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass)
+        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass),
       ),
     });
   },
   map_y: (fnStr: string) => {
     const fn = myEval(
-      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`
+      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`,
     );
     return ({ xs, ys, states, statistics, meta, vars, hass }) => ({
       xs,
       ys: ys.map((_, i) =>
         // prettier-ignore
-        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass)
+        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass),
       ),
     });
   },
   map_x: (fnStr: string) => {
     const fn = myEval(
-      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`
+      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`,
     );
     return ({ xs, ys, states, statistics, meta, vars, hass }) => ({
       ys,
       xs: xs.map((_, i) =>
         // prettier-ignore
-        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass)
+        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass),
       ),
     });
   },
-  resample:
-    (intervalStr: TimeDurationStr = "5m") =>
-    ({ xs, ys, states, statistics }) => {
+  resample: (
+    intervalOrObject:
+      | TimeDurationStr
+      | {
+          interval?: TimeDurationStr;
+          interpolate?: boolean;
+        } = "5m",
+  ) => {
+    const { interval: intervalStr = "5m", interpolate = false } =
+      typeof intervalOrObject == "string"
+        ? { interval: intervalOrObject }
+        : intervalOrObject;
+    return ({ xs, ys, states, statistics }) => {
       const data = {
         xs: [] as Date[],
         ys: [] as YValue[],
         states: [] as HassEntity[],
         statistics: [] as StatisticValue[],
       };
+      // Linear interpolation between neighbours, or hold the last value
+      const lerp = (x: number, i: number) => {
+        const [xa, xb, ya, yb] = [+xs[i], +xs[i + 1], ys[i], ys[i + 1]];
+        if (
+          typeof ya !== "number" ||
+          typeof yb !== "number" ||
+          !(xa <= x && x <= xb) ||
+          xa === xb
+        )
+          return ys[i];
+        return ya + ((yb - ya) * (x - xa)) / (xb - xa);
+      };
       const interval = parseTimeDuration(intervalStr);
       const x0 = Math.floor(+xs[0] / interval) * interval;
       const x1 = +xs[xs.length - 1];
       let i = 0;
       for (let x = x0; x < x1; x += interval) {
-        while (+xs[i + 1] < x && i < xs.length - 1) {
+        while (+xs[i + 1] <= x && i < xs.length - 1) {
           i++;
         }
         data.xs.push(new Date(x));
-        data.ys.push(ys[i]);
+        data.ys.push(interpolate ? lerp(x, i) : ys[i]);
         if (states[i]) data.states.push(states[i]);
         if (statistics[i]) data.statistics.push(statistics[i]);
       }
       return data;
-    },
+    };
+  },
   load_var:
     (var_name: string) =>
     ({ vars }) =>
@@ -357,31 +404,31 @@ const filters = {
         throw new Error(
           `Trendline '${p.type}' doesn't exist. Did you mean <b>${propose(
             p.type,
-            Object.keys(trendlineTypes)
-          )}<b>?\nOthers: ${Object.keys(trendlineTypes)}`
+            Object.keys(trendlineTypes),
+          )}<b>?\nOthers: ${Object.keys(trendlineTypes)}`,
         );
       }
       const regression: BaseRegression = new RegressionClass(
         xs_numbers,
         ys,
-        p.degree
+        p.degree,
       );
       let extras: string[] = [];
       if (p.show_r2)
         extras.push(
-          `r²=${maxDecimals(regression.score(xs_numbers, ys).r2, 2)}`
+          `r²=${maxDecimals(regression.score(xs_numbers, ys).r2, 2)}`,
         );
 
       if (forecast > 0) {
         const N = Math.round(
           (xs_numbers.length /
             (xs_numbers[xs_numbers.length - 1] - xs_numbers[0])) *
-            forecast
+            forecast,
         );
         xs_numbers.push(
           ...Array.from({ length: N }).map(
-            (_, i) => t1 - t0 + (forecast / N) * i
-          )
+            (_, i) => t1 - t0 + (forecast / N) * i,
+          ),
         );
       }
       const ys_out = regression.predict(xs_numbers);
@@ -405,12 +452,12 @@ const filters = {
     */
   filter: (fnStr: string) => {
     const fn = myEval(
-      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`
+      `(i, x, y, state, statistic, xs, ys, states, statistics, meta, vars, hass) => ${fnStr}`,
     );
     return ({ xs, ys, states, statistics, meta, vars, hass }) => {
       const mask = ys.map((_, i) =>
         // prettier-ignore
-        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass)
+        fn(i, xs[i], ys[i], states[i], statistics[i], xs, ys, states, statistics, meta, vars, hass),
       );
       return {
         ys: ys.filter((_, i) => mask[i]),
@@ -425,7 +472,7 @@ export default filters;
 function checkTimeUnits(unit: string) {
   if (!timeUnits[unit]) {
     throw new Error(
-      `Unit '${unit}' is not valid, use ${Object.keys(timeUnits)}`
+      `Unit '${unit}' is not valid, use ${Object.keys(timeUnits)}`,
     );
   }
 }
